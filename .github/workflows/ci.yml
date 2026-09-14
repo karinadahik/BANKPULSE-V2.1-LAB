@@ -10,6 +10,75 @@ permissions:
   contents: read
 
 jobs:
+  adr-governance:
+    name: ADR governance
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate ADR structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t ADR_FILES < <(
+            find docs/adr -maxdepth 1 -type f \
+              -name 'ADR-[0-9][0-9][0-9]-*.md' | sort
+          )
+
+          if [ "${#ADR_FILES[@]}" -eq 0 ]; then
+            echo "::error::No numbered ADR was found in docs/adr/"
+            exit 1
+          fi
+
+          for adr in "${ADR_FILES[@]}"; do
+            echo "Validating $adr"
+
+            for heading in \
+              "## Contexto" \
+              "## Decision" \
+              "## Source of Truth" \
+              "## Datos externos requeridos" \
+              "## Integracion" \
+              "## Consistencia" \
+              "## Seguridad y privacidad" \
+              "## Observabilidad" \
+              "## Alternativas consideradas" \
+              "## Consecuencias"
+            do
+              if ! grep -Fqx "$heading" "$adr"; then
+                echo "::error file=$adr::Missing required section: $heading"
+                exit 1
+              fi
+            done
+
+            if ! grep -Eq '^- \*\*Estado:\*\* (Propuesto|Aceptado|Reemplazado)$' "$adr"; then
+              echo "::error file=$adr::ADR Estado must be Propuesto, Aceptado or Reemplazado"
+              exit 1
+            fi
+          done
+
+      - name: Require ADR in Pull Request
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          echo "Files changed by this Pull Request:"
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" | tee /tmp/changed-files.txt
+
+          if ! grep -Eq '^docs/adr/ADR-[0-9]{3}-.*\.md$' /tmp/changed-files.txt; then
+            echo "::error::This Pull Request must add or modify a numbered ADR under docs/adr/"
+            exit 1
+          fi
+
+          echo "ADR evidence found."
   architecture-contract:
     name: Architecture contract
     runs-on: ubuntu-latest
@@ -39,7 +108,7 @@ jobs:
     name: Build, integration and observability
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: architecture-contract
+    needs: [architecture-contract, adr-governance]
     steps:
       - uses: actions/checkout@v4
       - name: Build and start BANKdragon V2

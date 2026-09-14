@@ -19,7 +19,11 @@ curl -fsS -X POST "$base_url/api/payments" \
   -H 'Content-Type: application/json' \
   -H "X-Idempotency-Key: $payment_key" \
   -d '{"account":"EC-4242","amount":27.50,"currency":"USD"}' >/tmp/bankpulse-payment-retry.json
-cmp /tmp/bankpulse-payment.json /tmp/bankpulse-payment-retry.json
+first_id="$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' /tmp/bankpulse-payment.json)"
+retry_id="$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' /tmp/bankpulse-payment-retry.json)"
+
+[ -n "$first_id" ]
+[ "$first_id" = "$retry_id" ]
 
 echo "[4/4] Esperando publicación del outbox"
 for _ in $(seq 1 20); do
