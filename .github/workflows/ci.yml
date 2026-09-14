@@ -66,7 +66,7 @@ jobs:
             fi
           done
 
-      - name: Require adr-tools ADR in Pull Request
+      - name: Require ADR for architectural changes
         if: github.event_name == 'pull_request'
         shell: bash
         env:
@@ -79,70 +79,173 @@ jobs:
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | tee /tmp/changed-files.txt
 
-          if ! grep -Eq '^docs/adr/[0-9]{4}-.*\.md$' /tmp/changed-files.txt; then
-            echo "::error::This Pull Request must add or modify an ADR managed by adr-tools"
-            exit 1
+          if grep -Eq \
+            '^(compose\.yaml|\.devcontainer/|docs/architecture/|observability/|services/[^/]+/(Dockerfile|src/main/resources/application\.yml))' \
+            /tmp/changed-files.txt; then
+
+            echo "Architectural change detected."
+
+            if ! grep -Eq '^docs/adr/[0-9]{4}-.*\.md$' \
+              /tmp/changed-files.txt; then
+
+              echo "::error::Architectural changes require an ADR managed by adr-tools"
+              exit 1
+            fi
+
+            echo "ADR evidence found."
+
+          else
+
+            echo "No architectural change detected; no new ADR required."
+
           fi
 
-          echo "adr-tools ADR evidence found."
+
   architecture-contract:
     name: Architecture contract
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Required deployable services
         run: |
           set -euo pipefail
-          for service in payments-api audit-api experiences-api travel-benefits-api events-api social-split-api; do
+
+          for service in \
+            payments-api \
+            audit-api \
+            experiences-api \
+            travel-benefits-api \
+            events-api \
+            social-split-api
+          do
             test -f "services/$service/Dockerfile"
             test -f "services/$service/pom.xml"
             test -f "services/$service/src/main/resources/application.yml"
           done
+
           test -f observability/compose.yaml
           test -f observability/prometheus.yml
           test -f observability/grafana/dashboards/bankpulse-overview.json
+
           test -f docs/architecture/DATA-OWNERSHIP.md
+
           test -f frontend/index.html
           test -f frontend/app.js
           test -f frontend/styles.css
+
+          test -f scripts/business-gate-payment-idempotency.sh
+
       - name: Validate compose models
         run: |
           docker compose config --quiet
           docker compose -f observability/compose.yaml config --quiet
 
+
   integration-test:
     name: Build, integration and observability
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [architecture-contract, adr-governance]
+
+    needs:
+      - architecture-contract
+      - adr-governance
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Build and start BANKdragon V2
-        run: docker compose up --build -d --wait --wait-timeout 300
+        run: |
+          docker compose up \
+            --build \
+            -d \
+            --wait \
+            --wait-timeout 300
+
       - name: Validate interactive edge UI
         run: |
-          curl -fsS http://localhost:8080/ | grep -q "BANKdragon"
-          curl -fsS http://localhost:8080/app.js | grep -q "Seat HOLD created"
+          curl -fsS http://localhost:8080/ \
+            | grep -q "BANKdragon"
+
+          curl -fsS http://localhost:8080/app.js \
+            | grep -q "Seat HOLD created"
+
+      - name: Business release gate - payment idempotency
+        run: |
+          bash scripts/business-gate-payment-idempotency.sh
+
       - name: Domain and regression smoke tests
-        run: bash scripts/smoke-v2.sh
+        run: |
+          bash scripts/smoke-v2.sh
+
       - name: Start Prometheus and Grafana
-        run: docker compose -f observability/compose.yaml up -d prometheus grafana
+        run: |
+          docker compose \
+            -f observability/compose.yaml \
+            up -d prometheus grafana
+
       - name: Validate observability endpoints
         run: |
-          for i in $(seq 1 30); do curl -fsS http://localhost:9090/-/healthy && break || sleep 2; done
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:9090/-/healthy \
+              && break \
+              || sleep 2
+          done
+
           curl -fsS http://localhost:9090/-/healthy
-          for i in $(seq 1 30); do curl -fsS http://localhost:3000/api/health && break || sleep 2; done
-          curl -fsS http://localhost:3000/api/health | grep -q '"database"'
+
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:3000/api/health \
+              && break \
+              || sleep 2
+          done
+
+          curl -fsS http://localhost:3000/api/health \
+            | grep -q '"database"'
+
       - name: Capture evidence on failure
         if: failure()
         run: |
+          echo "======================================"
+          echo " PLATFORM STATUS"
+          echo "======================================"
+
           docker compose ps || true
+
+          echo
+          echo "======================================"
+          echo " PLATFORM LOGS"
+          echo "======================================"
+
           docker compose logs --tail=250 || true
-          docker compose -f observability/compose.yaml ps || true
-          docker compose -f observability/compose.yaml logs --tail=150 || true
+
+          echo
+          echo "======================================"
+          echo " OBSERVABILITY STATUS"
+          echo "======================================"
+
+          docker compose \
+            -f observability/compose.yaml \
+            ps || true
+
+          echo
+          echo "======================================"
+          echo " OBSERVABILITY LOGS"
+          echo "======================================"
+
+          docker compose \
+            -f observability/compose.yaml \
+            logs --tail=150 || true
+
       - name: Stop observability
         if: always()
-        run: docker compose -f observability/compose.yaml down -v || true
+        run: |
+          docker compose \
+            -f observability/compose.yaml \
+            down -v || true
+
       - name: Stop platform
         if: always()
-        run: docker compose down -v || true
+        run: |
+          docker compose down -v || true
