@@ -2,82 +2,108 @@
 
 ## 1. Capacidad de negocio seleccionada
 
-BANKPULSE debe procesar una operación de pago **exactamente una vez**, incluso
-cuando el cliente o la red reintenten la misma solicitud.
+La capacidad crítica seleccionada en BANKPULSE es:
 
-La operación utiliza `X-Idempotency-Key` para identificar una misma intención
-de pago.
+> **Procesar una misma intención de pago exactamente una vez.**
 
-La capacidad crítica protegida es:
+Cuando un cliente o una red reintentan una solicitud, BANKPULSE utiliza
+`X-Idempotency-Key` para reconocer que se trata de la misma operación de
+negocio.
 
-> **Un mismo intento lógico de pago no debe generar más de un pago real.**
+La propiedad esperada es:
 
-Esta capacidad es especialmente importante para experiencias como
-**Social Split**, donde varios participantes pueden intervenir en una misma
-operación financiera y un reintento no debe convertirse en un cobro duplicado.
+```text
+Misma intención de pago
++
+Misma X-Idempotency-Key
++
+2 solicitudes
+=
+1 único pago
+```
+
+Esta capacidad evita que un reintento técnico se transforme en un nuevo cobro.
 
 ---
 
 ## 2. Escenario de falso verde
 
-La plataforma puede permanecer técnicamente disponible:
-
-- Payments API: UP
-- MariaDB: UP
-- Contenedores Docker: healthy
-- HTTP: 200
-- Health check: UP
-
-Sin embargo, un defecto en la lógica de idempotencia podría provocar que dos
-solicitudes con la misma `X-Idempotency-Key` creen dos pagos distintos.
-
-En este escenario:
+BANKPULSE puede permanecer técnicamente disponible:
 
 ```text
-Infraestructura    -> VERDE
-Health checks      -> VERDE
-HTTP               -> VERDE
-Base de datos      -> VERDE
-
-pero...
-
-Capacidad de negocio
-"procesar una vez" -> ROJO
+Payments API      UP
+Base de datos     UP
+Docker            healthy
+HTTP              disponible
+Health check      UP
 ```
 
-El sistema estaría técnicamente disponible, pero el negocio estaría generando
-un cobro duplicado.
+y, al mismo tiempo, incumplir la capacidad del negocio.
 
-Ese comportamiento representa un **falso verde**.
+El escenario seleccionado es:
+
+```text
+Request #1
+Idempotency-Key = ABC
+        |
+        v
+Payment A
+
+Request #2
+Idempotency-Key = ABC
+        |
+        v
+Payment B
+```
+
+El resultado es:
+
+```text
+Tecnología = VERDE
+
+pero
+
+Negocio = ROJO
+```
+
+La plataforma continúa respondiendo, pero una misma intención de pago genera
+dos pagos diferentes.
+
+Eso constituye el **falso verde**.
 
 ---
 
 ## 3. Riesgo / pérdida potencial
 
-Un fallo de idempotencia puede producir:
+Un defecto de idempotencia puede producir:
 
-- Cobros duplicados.
-- Pérdida financiera.
-- Reclamos de clientes.
-- Procesos de reverso.
-- Costos operativos adicionales.
-- Pérdida de confianza del socio.
-- Inconsistencias entre pagos y procesos asociados.
+- cobros duplicados;
+- pérdida financiera;
+- reclamos de clientes;
+- necesidad de reversos;
+- costos operativos adicionales;
+- inconsistencias de auditoría;
+- pérdida de confianza en la plataforma.
 
-Por esta razón no es suficiente validar únicamente que los servicios estén
-encendidos.
+Por esta razón, comprobar únicamente que el sistema está disponible no es
+suficiente.
 
-También debe validarse el comportamiento crítico del negocio.
+BANKPULSE también debe producir evidencia automática de que mantiene el
+comportamiento crítico del negocio.
 
 ---
 
 ## 4. Release Gate
 
-El pipeline incorpora una validación automática de la capacidad crítica antes
-de considerar una versión apta para continuar.
+Se implementó un Release Gate dentro de GitHub Actions.
+
+El flujo utilizado es:
 
 ```text
 Feature Branch
+      |
+      v
+Commit / Push
       |
       v
 Pull Request
@@ -109,97 +135,73 @@ La prueba automática se encuentra en:
 scripts/business-gate-payment-idempotency.sh
 ```
 
-La regla validada es:
+El script:
+
+1. verifica que Payments API esté disponible;
+2. genera una solicitud de pago;
+3. reintenta la misma operación con la misma `X-Idempotency-Key`;
+4. compara los identificadores de ambos pagos;
+5. valida que exista una sola operación correspondiente;
+6. permite o bloquea el release.
+
+La condición de aceptación es:
 
 ```text
-misma Idempotency-Key
-        +
-2 solicitudes
-        =
-1 único pago
+Same Idempotency-Key
+-> 2 requests
+-> 1 payment
 ```
-
-El Release Gate comprueba que:
-
-1. las dos solicitudes devuelvan el mismo `payment id`;
-2. exista exactamente un pago asociado a la operación;
-3. la disponibilidad técnica no sea utilizada como único criterio de éxito.
-
-Si la regla se incumple, el pipeline debe bloquear la entrega.
 
 ---
 
-# 5. KPIs estratégicos — Épica Social Split
+# 5. Épica y KPIs estratégicos
 
 ## 5.1 Épica seleccionada
 
-La épica seleccionada es:
+Para complementar el Release Gate con observabilidad de negocio se seleccionó
+la épica:
 
 > **Social Split para consumo colaborativo**
 
-Su objetivo de negocio es permitir que varios socios distribuyan de manera
-coordinada el costo de una experiencia compartida.
+El objetivo es permitir que varios socios distribuyan el costo de una
+experiencia compartida, autoricen su participación y completen la operación
+colectiva únicamente cuando se cumplan las reglas del negocio.
 
-La experiencia requiere:
-
-- incorporar participantes;
-- distribuir el monto del consumo;
-- obtener autorización explícita;
-- mantener visible el progreso;
-- cerrar la operación colectiva solamente cuando se cumplan las reglas del
-  negocio.
-
-El bounded context principal utilizado para estos KPI es:
+El bounded context principal es:
 
 ```text
-Social Split
+SOCIAL SPLIT
 ```
 
-Su responsabilidad incluye:
+Dentro de este contexto se manejan conceptos como:
 
 ```text
 Split Session
 Participantes
-Distribución del monto
+Monto compartido
 Autorizaciones
 Estado de la operación
 Cierre del consumo compartido
 ```
 
-La relación conceptual con el contexto financiero puede representarse como:
+La relación conceptual utilizada es:
 
 ```text
 SOCIAL SPLIT
 sesión + participantes + autorizaciones
              |
-             | referencia / necesidad financiera
              v
 PAYMENTS / CORE FINANCIERO
-procesamiento de pagos
+procesamiento del pago
              |
              v
 AUDIT
 trazabilidad
 ```
 
-Los KPI se definen primero utilizando lenguaje de negocio y luego se traducen
-a métricas técnicas observables.
-
 ---
 
-## 5.2 Resumen de los 5 KPI
-
-| KPI | Pregunta de negocio |
-|---|---|
-| **KPI 1 — Tasa de cierre exitoso de consumos compartidos** | ¿Qué porcentaje de los consumos compartidos iniciados logra concretarse correctamente? |
-| **KPI 2 — Tasa de adhesión de participantes** | ¿Qué porcentaje de las personas incorporadas acepta y autoriza su participación? |
-| **KPI 3 — Tiempo promedio de cierre** | ¿Cuánto tiempo necesita un grupo para concretar el consumo compartido? |
-| **KPI 4 — Tasa de intentos de cierre bloqueados por autorización incompleta** | ¿Qué porcentaje de intentos de cierre debe ser bloqueado porque todavía faltan autorizaciones? |
-| **KPI 5 — Tasa de integridad de distribución del monto compartido** | ¿Qué porcentaje de operaciones distribuye correctamente el monto total acordado entre sus participantes? |
-
----
-
-## 5.3 KPI 1 — Tasa de cierre exitoso de consumos compartidos
+## 5.2 KPI 1 — Tasa de cierre exitoso de consumos compartidos
 
 ### Pregunta de negocio
 
@@ -221,21 +223,24 @@ bankpulse_social_split_sessions_completed_total
 bankpulse_social_split_sessions_initiated_total
 ```
 
-### Qué protege
+### Valor observado en la prueba
 
-Permite observar si una experiencia Social Split que comienza realmente logra
-convertirse en una operación colectiva completada.
+```text
+100 %
+```
 
-Una cantidad elevada de operaciones abiertas que nunca terminan puede indicar
-fricción o pérdida de valor para el negocio.
+### Interpretación
+
+Durante el escenario controlado, todas las operaciones Social Split iniciadas
+por la prueba llegaron correctamente a `COMPLETED`.
 
 ---
 
-## 5.4 KPI 2 — Tasa de adhesión de participantes
+## 5.3 KPI 2 — Tasa de adhesión de participantes
 
 ### Pregunta de negocio
 
-¿Qué porcentaje de las personas incorporadas a un consumo compartido acepta y
+¿Qué porcentaje de las personas incorporadas al consumo compartido acepta y
 autoriza su participación?
 
 ### Fórmula
@@ -253,26 +258,30 @@ bankpulse_social_split_participants_authorized_total
 bankpulse_social_split_participants_added_total
 ```
 
-### Qué protege
+### Valor observado en la prueba
 
-Permite identificar si los participantes realmente continúan con la experiencia
-después de ser incorporados al consumo compartido.
+```text
+100 %
+```
 
-Una baja adhesión puede impedir que la operación colectiva llegue a concretarse.
+### Interpretación
+
+Los dos participantes incorporados al escenario automatizado autorizaron su
+participación.
 
 ---
 
-## 5.5 KPI 3 — Tiempo promedio de cierre
+## 5.4 KPI 3 — Tiempo promedio de cierre
 
 ### Pregunta de negocio
 
-¿Cuánto tiempo necesita un grupo para concretar un consumo compartido desde su
-creación hasta el cierre?
+¿Cuánto tiempo necesita un grupo para completar una operación compartida desde
+su creación hasta su cierre?
 
 ### Fórmula
 
 ```text
-Suma del tiempo de cierre
+Suma de tiempos de cierre
 -------------------------
 Operaciones completadas
 ```
@@ -284,8 +293,6 @@ bankpulse_social_split_sessions_close_duration_seconds_sum
 bankpulse_social_split_sessions_close_duration_seconds_count
 ```
 
-### Implementación
-
 El modelo registra:
 
 ```text
@@ -293,26 +300,25 @@ createdAt
 completedAt
 ```
 
-Por lo tanto:
+por lo que:
 
 ```text
 duración = completedAt - createdAt
 ```
 
-### Qué protege
+### Valor observado en la prueba
 
-Permite identificar fricción en la experiencia.
-
-Una operación puede terminar correctamente y, sin embargo, tardar demasiado
-tiempo para resultar conveniente para los participantes.
+```text
+aproximadamente 1.17 segundos
+```
 
 ---
 
-## 5.6 KPI 4 — Tasa de intentos de cierre bloqueados por autorización incompleta
+## 5.5 KPI 4 — Tasa de intentos de cierre bloqueados por autorización incompleta
 
 ### Pregunta de negocio
 
-¿Qué porcentaje de los intentos de concretar un consumo compartido debe ser
+¿Qué porcentaje de los intentos de concretar una operación compartida debe ser
 bloqueado porque todavía faltan autorizaciones?
 
 ### Fórmula
@@ -330,46 +336,49 @@ bankpulse_social_split_sessions_close_blocked_total
 bankpulse_social_split_sessions_close_attempts_total
 ```
 
-### Regla de negocio
-
-Social Split no debe completar una operación mientras exista al menos un
-participante pendiente de autorización.
-
-Conceptualmente:
+### Valor observado en la prueba
 
 ```text
+50 %
+```
+
+### Interpretación
+
+La prueba realiza deliberadamente dos intentos de cierre:
+
+```text
+Intento #1
 faltan autorizaciones
-        |
-        v
-     BLOCK
+-> BLOCKED
+
+Intento #2
+todos autorizaron
+-> COMPLETED
 ```
 
-y:
+Por tanto:
 
 ```text
-todos autorizaron
-        |
-        v
-    COMPLETED
+1 cierre bloqueado
+------------------
+2 intentos
+
+= 50 %
 ```
 
-### Qué protege
+Este valor no representa una meta comercial.
 
-Evita cerrar una operación colectiva antes de que todos los participantes hayan
-confirmado su participación.
-
-Este KPI no representa por sí mismo una meta positiva o negativa. Su
-interpretación depende del contexto operativo y del comportamiento de los
-usuarios.
+Demuestra que la regla que evita cerrar prematuramente una operación Social
+Split está funcionando.
 
 ---
 
-## 5.7 KPI 5 — Tasa de integridad de distribución del monto compartido
+## 5.6 KPI 5 — Tasa de integridad de distribución del monto
 
 ### Pregunta de negocio
 
-¿Qué porcentaje de los consumos compartidos distribuye correctamente el monto
-total acordado entre los participantes?
+¿Qué porcentaje de las operaciones distribuye correctamente el monto total
+acordado entre sus participantes?
 
 ### Fórmula
 
@@ -386,46 +395,41 @@ bankpulse_social_split_settlements_valid_total
 bankpulse_social_split_settlements_invalid_total
 ```
 
-### Regla utilizada
-
-Para la instrumentación del laboratorio se considera válida la distribución
-cuando:
+Para este laboratorio se considera una distribución válida cuando:
 
 ```text
-suma de shareAmount de participantes
+suma de shareAmount
 =
-totalAmount de la sesión
+totalAmount
 ```
 
-Ejemplo:
+El escenario automatizado utiliza:
 
 ```text
-Monto total: $100
+Monto total = USD 100
 
-Participante A: $40
-Participante B: $60
+Participante A = USD 40
+Participante B = USD 60
 
-$40 + $60 = $100
-
-Distribución válida
+40 + 60 = 100
 ```
 
-### Qué protege
+### Valor observado en la prueba
 
-Permite detectar operaciones que técnicamente llegaron a completarse pero cuya
-distribución económica no representa correctamente el monto acordado.
+```text
+100 %
+```
 
-Esta validación protege la integridad de la distribución dentro de Social Split.
+Esta validación comprueba la distribución del monto dentro de Social Split.
 
-La validación de que cada `paymentReference` corresponde efectivamente a un pago
-financiero válido pertenece a una integración posterior con el contexto de
-Payments.
+La validación completa de que cada `paymentReference` corresponde a una
+transacción financiera real pertenece al contexto Payments.
 
 ---
 
-# 6. Instrumentación y observabilidad de los KPI
+# 6. Instrumentación de los KPIs
 
-Las métricas fueron implementadas utilizando:
+Los KPIs fueron instrumentados utilizando:
 
 ```text
 Spring Boot Actuator
@@ -434,34 +438,25 @@ Prometheus
 Grafana
 ```
 
-El flujo de observabilidad implementado es:
+La cadena implementada es:
 
 ```text
-DDD / Épica Social Split
-          |
-          v
-Reglas de negocio
-          |
-          v
-Eventos del dominio
-          |
-          v
+Épica Social Split
+        |
+        v
+Reglas del dominio
+        |
+        v
 Micrometer
-          |
-          v
+        |
+        v
 /actuator/prometheus
-          |
-          v
+        |
+        v
 Prometheus
-          |
-          v
+        |
+        v
 Grafana
-```
-
-El endpoint del servicio expone las métricas mediante:
-
-```text
-/actuator/prometheus
 ```
 
 Prometheus recolecta las métricas desde:
@@ -470,34 +465,29 @@ Prometheus recolecta las métricas desde:
 social-split-api:8086
 ```
 
----
-
-## 6.1 Business KPI Gate
-
 Se creó el script:
 
 ```text
 scripts/business-kpi-social-split.sh
 ```
 
-Este script ejecuta automáticamente un escenario completo:
+que ejecuta automáticamente:
 
 ```text
-Crear Social Split de $100
+Crear Social Split de USD 100
         |
         v
-Agregar participante A = $40
-Agregar participante B = $60
+Agregar participante A = USD 40
+Agregar participante B = USD 60
         |
         v
-Intentar cerrar sin autorizaciones
+Intentar cerrar sin autorización
         |
         v
-BLOCK esperado
+BLOCK
         |
         v
-Autorizar participante A
-Autorizar participante B
+Autorizar A y B
         |
         v
 Cerrar Social Split
@@ -506,10 +496,10 @@ Cerrar Social Split
 COMPLETED
         |
         v
-Validar los 5 KPI
+Validar 5 KPI
 ```
 
-Resultado obtenido:
+El resultado obtenido fue:
 
 ```text
 KPI 1 PASS - Social Split completed
@@ -519,47 +509,6 @@ KPI 4 PASS - Premature close blocked
 KPI 5 PASS - Financial distribution balanced
 
 BUSINESS KPI GATE: PASS
-```
-
----
-
-## 6.2 Resultado del escenario controlado
-
-Durante la prueba automatizada se observaron los siguientes valores:
-
-| KPI | Resultado |
-|---|---:|
-| Tasa de cierre exitoso | 100.00 % |
-| Tasa de adhesión | 100.00 % |
-| Tiempo promedio de cierre | aproximadamente 1.17 s |
-| Intentos de cierre bloqueados | 50.00 % |
-| Integridad de distribución | 100.00 % |
-
-Estos valores corresponden al **escenario controlado del laboratorio**.
-
-No representan todavía metas comerciales ni SLA oficiales de producción.
-
-El 50 % observado en el KPI 4 se explica porque el escenario realiza
-deliberadamente:
-
-```text
-Intento de cierre #1
-faltan autorizaciones
--> BLOCKED
-
-Intento de cierre #2
-todos autorizados
--> COMPLETED
-```
-
-Por lo tanto:
-
-```text
-1 bloqueo
----------
-2 intentos
-=
-50 %
 ```
 
 ---
@@ -578,19 +527,20 @@ Archivo:
 observability/grafana/dashboards/social-split-business-kpis.json
 ```
 
-El dashboard permite visualizar:
+Los valores observados durante la prueba fueron:
 
-1. Cierre exitoso de consumos compartidos.
-2. Adhesión de participantes.
-3. Tiempo promedio de cierre.
-4. Cierres bloqueados por autorización incompleta.
-5. Integridad de distribución del monto.
+| KPI | Resultado |
+|---|---:|
+| Cierre exitoso de consumos compartidos | 100 % |
+| Adhesión de participantes | 100 % |
+| Tiempo promedio de cierre | 1.17 s |
+| Cierres bloqueados por autorización incompleta | 50 % |
+| Integridad de distribución del monto | 100 % |
 
-No se configuraron umbrales comerciales artificiales porque el caso no define
-todavía metas oficiales de producción.
+Estos valores corresponden a un escenario automatizado y controlado.
 
-Por esta razón los paneles presentan los valores observados sin clasificarlos
-automáticamente como buenos o malos.
+No se definieron umbrales comerciales artificiales porque el laboratorio no
+establece SLA o metas oficiales para estos indicadores.
 
 ---
 
@@ -602,79 +552,51 @@ El workflow:
 .github/workflows/ci.yml
 ```
 
-incorpora validaciones de arquitectura, comportamiento de negocio y
-observabilidad.
-
-El flujo relevante queda:
+incluye actualmente:
 
 ```text
-Pull Request
-     |
-     v
-ADR Governance
-     |
-     v
-Architecture Contract
-     |
-     v
-Build BANKPULSE
-     |
-     v
-Technical Validation
-     |
-     +------------------------------+
-     |                              |
-     v                              v
-Payment Business Gate       Social Split KPI Gate
-     |                              |
-     v                              v
-Idempotency                  5 KPI de negocio
-     |                              |
-     +--------------+---------------+
-                    |
-                    v
-             Smoke Tests
-                    |
-                    v
-               Prometheus
-                    |
-                    v
-                 Grafana
-```
-
-El pipeline incluye:
-
-```text
+ADR governance
+Architecture contract
+Build and start BANKdragon
 Business release gate - payment idempotency
 Business KPI gate - Social Split
+Domain and regression smoke tests
+Prometheus
+Grafana
 Validate Social Split KPIs in Prometheus
 ```
 
-De esta manera CI no valida únicamente que la aplicación compile o que los
-contenedores estén encendidos.
+De esta forma, el pipeline no valida únicamente:
 
-También verifica comportamiento observable del negocio.
+```text
+¿compila?
+¿está UP?
+¿responde HTTP?
+```
+
+sino también:
+
+```text
+¿conserva el comportamiento crítico del negocio?
+¿expone las señales estratégicas esperadas?
+```
 
 ---
 
-# 9. Evidencia de PR exitoso
+# 9. PR exitoso inicial
 
-Se creó el Pull Request:
+Antes de provocar deliberadamente el falso verde se ejecutó correctamente el
+Release Gate de Payments.
 
-```text
-PR #3
-feature/business-release-gate
-```
-
-GitHub Actions ejecutó correctamente:
+En el PR correspondiente, GitHub Actions terminó con:
 
 ```text
-ADR governance                           PASS
-Architecture contract                    PASS
-Build, integration and observability     PASS
+ADR governance                         PASS
+Architecture contract                  PASS
+Build, integration and observability   PASS
 ```
 
-Dentro del job de integración se observó:
+Dentro del job de integración:
 
 ```text
 Build and start BANKdragon V2                 PASS
@@ -685,119 +607,277 @@ Start Prometheus and Grafana                  PASS
 Validate observability endpoints              PASS
 ```
 
-Esta ejecución representa el comportamiento correcto antes de provocar
-deliberadamente el falso verde.
+El Business Release Gate confirmó:
+
+```text
+Payments API: UP
+
+Same Idempotency-Key
+-> 2 requests
+-> 1 payment
+
+BUSINESS RELEASE GATE: PASS
+```
+
+Esto representa el comportamiento correcto previo al experimento.
 
 ---
 
-# 10. Escenario de falso verde provocado
+# 10. PR de KPIs y observabilidad
 
-> **Pendiente de completar durante la prueba deliberada final.**
+Posteriormente se incorporaron los cinco KPIs de Social Split al pipeline.
 
-Para demostrar el falso verde se modificará temporalmente el comportamiento de
-idempotencia de Payments.
-
-El escenario esperado será:
+El PR de KPIs terminó con:
 
 ```text
-Payments API       UP
-Docker             healthy
-Base de datos      UP
-HTTP               disponible
-Health check       UP
-
-pero
-
-misma operación
-2 requests
-2 payments
-
-BUSINESS RELEASE GATE -> BLOCK
+ADR governance                         PASS
+Architecture contract                  PASS
+Build, integration and observability   PASS
 ```
 
-El objetivo no es provocar una caída técnica.
+Además se incorporó un ADR para documentar la decisión de observar el
+bounded context Social Split mediante métricas de negocio, Prometheus y
+Grafana.
 
-El objetivo es demostrar que la plataforma puede estar técnicamente saludable
-mientras incumple una capacidad crítica del negocio.
+El pipeline verificó:
+
+```text
+Business release gate - payment idempotency   PASS
+Business KPI gate - Social Split              PASS
+Validate Social Split KPIs in Prometheus      PASS
+```
 
 ---
 
-# 11. Evidencia del bloqueo
+# 11. Falso verde provocado
 
-> **Pendiente de capturar durante la ejecución del escenario deliberadamente defectuoso.**
-
-La evidencia deberá mostrar:
+Para demostrar el falso verde se creó la rama:
 
 ```text
-Build and start BANKdragon V2                 PASS
-Validate interactive edge UI                  PASS
-Business release gate - payment idempotency   FAIL
-Capture evidence on failure                   EXECUTED
+feature/false-green-experiment
 ```
 
-El Business Release Gate deberá producir un mensaje equivalente a:
+Se introdujo deliberadamente un defecto en:
 
 ```text
-RELEASE BLOCKED
+services/payments-api/src/main/java/com/bankpulse/payments/PaymentService.java
 ```
 
-La evidencia debe demostrar que la infraestructura estaba disponible pero que
-el comportamiento del negocio era incorrecto.
+La implementación correcta utiliza:
 
----
-
-# 12. Diagnóstico y corrección
-
-> **Pendiente de completar después de provocar el falso verde.**
-
-El diagnóstico deberá identificar que el fallo pertenece a la lógica de
-idempotencia y no a la disponibilidad técnica.
-
-La corrección deberá restaurar la propiedad:
-
-```text
-misma intención de pago
-+
-mismo X-Idempotency-Key
-=
-mismo payment
+```java
+payments.findByIdempotencyKey(idempotencyKey)
 ```
 
-Después de aplicar la corrección se ejecutará nuevamente el pipeline.
+para devolver el pago existente cuando recibe nuevamente la misma intención.
 
----
+Durante el experimento se ignoró deliberadamente esa regla y se generó una
+clave interna diferente en cada solicitud.
 
-# 13. Ejecución final
-
-> **Pendiente de completar después de aplicar la corrección.**
-
-El resultado final esperado es:
+Conceptualmente:
 
 ```text
-Technical Health              PASS
-Payment Business Gate         PASS
-Social Split KPI Gate         PASS
-Smoke Tests                   PASS
-Prometheus                    PASS
-Grafana                       PASS
-```
-
-Esto demostrará el ciclo completo:
-
-```text
-Comportamiento correcto
+Request #1
+Idempotency-Key = ABC
         |
         v
-Pipeline verde
+ABC-fault-1
+        |
+        v
+Payment A
+
+Request #2
+Idempotency-Key = ABC
+        |
+        v
+ABC-fault-2
+        |
+        v
+Payment B
+```
+
+La API continuó técnicamente saludable.
+
+Docker mostró:
+
+```text
+payments-api
+Up
+healthy
+```
+
+El Business Release Gate también comprobó:
+
+```text
+Payments API: UP
+```
+
+Sin embargo, al repetir la misma operación produjo:
+
+```text
+RELEASE BLOCKED: retry created a different payment
+
+First payment:
+5a7e6c96-3313-44e5-b789-21774651b21b
+
+Second payment:
+0ad7a7f3-2f1c-4539-9a00-d4d0e1e7460c
+```
+
+Por tanto:
+
+```text
+Tecnología = VERDE
+
+Negocio = ROJO
+```
+
+---
+
+# 12. Evidencia del bloqueo
+
+La versión defectuosa fue enviada mediante Pull Request.
+
+Los controles de arquitectura continuaron aprobando:
+
+```text
+ADR governance          PASS
+Architecture contract   PASS
+```
+
+Sin embargo:
+
+```text
+Build, integration and observability   FAIL
+```
+
+Dentro del job, la infraestructura alcanzó correctamente el estado esperado,
+pero falló:
+
+```text
+Business release gate - payment idempotency   FAIL
+```
+
+El Release Gate produjo:
+
+```text
+Payments API: UP
+```
+
+seguido de:
+
+```text
+RELEASE BLOCKED:
+retry created a different payment
+```
+
+Por tanto, CI evitó que una versión técnicamente saludable pero incorrecta
+desde el punto de vista del negocio pudiera ser aceptada.
+
+---
+
+# 13. Diagnóstico
+
+El diagnóstico mostró que la falla no correspondía a:
+
+```text
+Docker
+Base de datos
+Health check
+Disponibilidad de Payments API
+HTTP
+```
+
+La causa pertenecía a la lógica de negocio.
+
+La versión defectuosa ignoraba la `X-Idempotency-Key` recibida y generaba una
+clave distinta para cada ejecución.
+
+Por tanto, una misma intención lógica era interpretada como operaciones
+diferentes.
+
+La causa raíz fue:
+
+> **Pérdida de la propiedad de idempotencia en PaymentService.**
+
+---
+
+# 14. Corrección
+
+Se restauró la implementación original de `PaymentService`.
+
+La lógica correcta volvió a utilizar:
+
+```java
+return payments.findByIdempotencyKey(idempotencyKey)
+    .orElseGet(() -> persist(idempotencyKey, request));
+```
+
+La regla volvió a ser:
+
+```text
+Misma Idempotency-Key
+        |
+        v
+¿Existe el pago?
+   |          |
+  SÍ         NO
+   |          |
+   v          v
+devolver     crear
+el mismo     uno nuevo
+pago
+```
+
+Después de la corrección se ejecutó nuevamente el Business Release Gate.
+
+El resultado volvió a ser:
+
+```text
+Payments API: UP
+
+Same Idempotency-Key
+-> 2 requests
+-> 1 payment
+
+BUSINESS RELEASE GATE: PASS
+```
+
+---
+
+# 15. Ejecución final
+
+Después de corregir la idempotencia, el mismo Pull Request fue ejecutado
+nuevamente.
+
+La ejecución final terminó:
+
+```text
+ADR governance                         PASS
+Architecture contract                  PASS
+Build, integration and observability   PASS
+```
+
+El pipeline completo volvió a estado verde.
+
+Esto demuestra el ciclo requerido:
+
+```text
+Sistema correcto
+        |
+        v
+CI PASS
         |
         v
 Defecto deliberado
         |
         v
-Tecnología verde / negocio rojo
+Tecnología UP
+Negocio incorrecto
         |
         v
-Release bloqueado
+Business Release Gate
+BLOCK
         |
         v
 Diagnóstico
@@ -806,72 +886,110 @@ Diagnóstico
 Corrección
         |
         v
-Pipeline verde nuevamente
+CI nuevamente
+        |
+        v
+PASS
 ```
 
 ---
 
-# 14. Conclusión
+# 16. Evidencia resumida
 
-El laboratorio demuestra que la disponibilidad técnica no es suficiente para
-determinar si una plataforma está funcionando correctamente.
+## Estado correcto inicial
+
+```text
+Technical Health      PASS
+Payment Business Gate PASS
+```
+
+## Falso verde
+
+```text
+Payments API          UP
+Docker                healthy
+Business behavior     FAIL
+Release Gate          BLOCK
+```
+
+## Estado corregido
+
+```text
+ADR Governance        PASS
+Architecture Contract PASS
+Payment Business Gate PASS
+Social Split KPI Gate PASS
+Prometheus            PASS
+Grafana               PASS
+Pipeline final        PASS
+```
+
+---
+
+# 17. Conclusión
+
+El ejercicio demuestra que:
+
+> **Disponibilidad técnica no significa comportamiento correcto del negocio.**
 
 BANKPULSE puede mantener:
 
 ```text
-servicios UP
-contenedores healthy
+API UP
+Docker healthy
+Base de datos UP
 HTTP disponible
-base de datos disponible
+Health checks verdes
 ```
 
-y aun así generar pérdida de valor si una regla crítica del negocio se rompe.
-
-Por esta razón se incorporaron dos niveles complementarios de protección:
+y simultáneamente producir:
 
 ```text
-Payments
--> Business Release Gate
--> evita pagos duplicados
-
-Social Split
--> Business KPI Gate
--> valida comportamiento y señales estratégicas
+dos pagos
+para una misma intención
 ```
 
-Finalmente, las métricas del dominio son recolectadas mediante Prometheus y
-visualizadas en Grafana.
+El Release Gate permite detectar esa diferencia antes de aceptar la versión.
 
-El recorrido implementado conecta:
+Además, la incorporación de los cinco KPIs de Social Split amplía la
+observabilidad desde métricas puramente técnicas hacia señales relacionadas con
+el valor del negocio.
+
+El recorrido implementado queda:
 
 ```text
 DDD
-|
-v
+ |
+ v
 Bounded Context
-|
-v
+ |
+ v
 Épica Social Split
-|
-v
+ |
+ v
 KPIs estratégicos
-|
-v
+ |
+ v
 Reglas de negocio
-|
-v
-CI / Release Gates
-|
-v
+ |
+ v
+Business Tests
+ |
+ v
+CI / Release Gate
+ |
+ v
 Prometheus
-|
-v
+ |
+ v
 Grafana
-|
-v
+ |
+ v
 Observabilidad del negocio
 ```
 
-El objetivo final no es únicamente demostrar que BANKPULSE está encendido, sino
-demostrar con evidencia que las capacidades críticas del negocio continúan
-funcionando correctamente.
+El resultado final no busca demostrar únicamente que BANKPULSE está
+encendido.
+
+Busca producir evidencia automática de que, **mientras permanece disponible,
+continúa cumpliendo las promesas críticas que hizo al negocio**.
